@@ -76,6 +76,68 @@ fn main() {
     }
     
     println!("All shared memory segments allocated");
+    
+    // ===== NEW CHANNEL VECTOR INITIALIZATION DEMO =====
+    println!("\n=== Channel Vector Initialization Demo ===");
+    
+    // Add channels to the channel vector first
+    let channels_to_add = vec![
+        ("events".to_string(), 2 * 1024 * 1024),      // 2MB for events
+        ("notifications".to_string(), 1 * 1024 * 1024), // 1MB for notifications  
+        ("requests".to_string(), 3 * 1024 * 1024),     // 3MB for requests
+        ("analytics".to_string(), 1 * 1024 * 1024),    // 1MB for analytics
+    ];
+    
+    println!("\n--- Adding Channels to Vector ---");
+    for (channel_name, size) in channels_to_add {
+        match allocator.add_channel(channel_name.clone(), size) {
+            Ok(_) => println!("Added channel '{}' with {} bytes", channel_name, size),
+            Err(e) => println!("Failed to add channel '{}': {}", channel_name, e),
+        }
+    }
+    
+    // Show all channels in the vector
+    let channel_names = allocator.get_channel_names();
+    println!("\nChannels in vector: {:?}", channel_names);
+    
+    // Initialize all channels with shared memory segments
+    println!("\n--- Initializing All Channels with Memory ---");
+    match allocator.initialize_all_channels() {
+        Ok(segments) => {
+            println!("Successfully initialized {} channels with memory segments:", segments.len());
+            for segment_id in segments {
+                println!("  - {}", segment_id);
+            }
+        }
+        Err(e) => println!("Failed to initialize channels: {}", e),
+    }
+    
+    // Initialize a specific channel
+    println!("\n--- Initializing Specific Channel ---");
+    match allocator.initialize_channel("events") {
+        Ok(segment_id) => println!("Initialized 'events' channel with segment: {}", segment_id),
+        Err(e) => println!("Failed to initialize 'events' channel: {}", e),
+    }
+    
+    // Show channel information
+    println!("\n--- Channel Information ---");
+    for channel_name in &channel_names {
+        if let Some(channel_info) = allocator.get_channel_info(channel_name) {
+            println!("Channel '{}': {} bytes allocated", channel_name, channel_info.max_size);
+        }
+    }
+    
+    // Show memory statistics
+    println!("\n--- Memory Statistics ---");
+    println!("Total channel memory: {} bytes", allocator.get_total_channel_memory());
+    println!("Max memory limit: {} bytes", allocator.max_size);
+    println!("Memory usage: {:.1}%", (allocator.get_total_channel_memory() as f64 / allocator.max_size as f64) * 100.0);
+    
+    // Check memory limit
+    match allocator.check_memory_limit() {
+        Ok(_) => println!("Memory limit check: PASSED"),
+        Err(e) => println!("Memory limit check: FAILED - {}", e),
+    }
     // Example: Allocate shared memory segment
     match allocator.allocate_shared_memory_segment("channel_events", 1024 * 1024) { // 1MB segment
         Ok(segment_id) => {

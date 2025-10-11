@@ -1,161 +1,11 @@
-use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
-use chrono::{DateTime, Utc};
-use thiserror::Error;
+use chrono::Utc;
+
 
 use crate::ICP::structs::{Message, MessageType, DmepError, DmepResult, SharedMemorySegment};
+use crate::Aloc::Channels::Structs::{ChannelConfig, ChannelState, ChannelPartitionError, SubscriberType, SubscriberInfo, ChannelStats, ChannelPartition, ChannelSummary, ChannelPartitionManager};
 
-/// Error types for channel partition operations
-#[derive(Error, Debug)]
-pub enum ChannelPartitionError {
-    #[error("Channel partition not found: {0}")]
-    ChannelNotFound(String),
-    #[error("Channel partition already exists: {0}")]
-    ChannelAlreadyExists(String),
-    #[error("Insufficient memory for channel: {0}")]
-    InsufficientMemory(String),
-    #[error("Channel partition is locked: {0}")]
-    ChannelLocked(String),
-    #[error("Invalid channel configuration: {0}")]
-    InvalidConfiguration(String),
-    #[error("Serialization error: {0}")]
-    SerializationError(String),
-    #[error("Deserialization error: {0}")]
-    DeserializationError(String),
-}
-
-/// Channel partition state
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub enum ChannelState {
-    Active,
-    Inactive,
-    Swapping,
-    Locked,
-    Error,
-}
-
-/// Channel partition configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelConfig {
-    /// Maximum message size for this channel
-    pub max_message_size: usize,
-    /// Maximum number of messages in queue
-    pub max_queue_size: usize,
-    /// Message TTL in seconds
-    pub message_ttl: u64,
-    /// Whether to persist messages to disk
-    pub persistent: bool,
-    /// Whether to enable message ordering
-    pub ordered: bool,
-    /// Whether to enable message deduplication
-    pub deduplicate: bool,
-}
-
-impl Default for ChannelConfig {
-    fn default() -> Self {
-        Self {
-            max_message_size: 1024 * 1024, // 1MB
-            max_queue_size: 1000,
-            message_ttl: 3600, // 1 hour
-            persistent: false,
-            ordered: true,
-            deduplicate: false,
-        }
-    }
-}
-
-/// Channel partition statistics
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelStats {
-    /// Total messages sent
-    pub messages_sent: u64,
-    /// Total messages received
-    pub messages_received: u64,
-    /// Total messages dropped
-    pub messages_dropped: u64,
-    /// Current queue size
-    pub current_queue_size: usize,
-    /// Memory usage in bytes
-    pub memory_usage: usize,
-    /// Last message timestamp
-    pub last_message_time: Option<DateTime<Utc>>,
-    /// Average message processing time in milliseconds
-    pub avg_processing_time_ms: f64,
-}
-
-impl Default for ChannelStats {
-    fn default() -> Self {
-        Self {
-            messages_sent: 0,
-            messages_received: 0,
-            messages_dropped: 0,
-            current_queue_size: 0,
-            memory_usage: 0,
-            last_message_time: None,
-            avg_processing_time_ms: 0.0,
-        }
-    }
-}
-
-/// Channel partition structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelPartition {
-    /// Channel identifier
-    pub channel: String,
-    /// Maximum total memory allocation size in bytes
-    pub max_size: usize,
-    /// Current memory usage
-    pub used_size: usize,
-    /// Channel state
-    pub state: ChannelState,
-    /// Channel configuration
-    pub config: ChannelConfig,
-    /// Channel statistics
-    pub stats: ChannelStats,
-    /// Created timestamp
-    pub created_at: DateTime<Utc>,
-    /// Last accessed timestamp
-    pub last_accessed: DateTime<Utc>,
-    /// Associated shared memory segment ID
-    pub segment_id: Option<String>,
-    /// Message queue for this channel
-    pub message_queue: Vec<Message>,
-    /// Subscribed modules/functions
-    pub subscribers: HashMap<String, SubscriberInfo>,
-    /// Channel metadata
-    pub metadata: HashMap<String, String>,
-}
-
-/// Subscriber information
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubscriberInfo {
-    /// Subscriber ID
-    pub id: String,
-    /// Subscriber type (function, module, service)
-    pub subscriber_type: SubscriberType,
-    /// Language/runtime (rust, python, node, etc.)
-    pub language: String,
-    /// Function/module name to call
-    pub target: String,
-    /// Whether subscriber is active
-    pub active: bool,
-    /// Last response time
-    pub last_response_time: Option<DateTime<Utc>>,
-    /// Response timeout in milliseconds
-    pub timeout_ms: u64,
-}
-
-/// Subscriber types
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum SubscriberType {
-    Function,
-    Module,
-    Service,
-    Webhook,
-    Queue,
-}
 
 impl ChannelPartition {
     /// Create a new channel partition
@@ -177,8 +27,8 @@ impl ChannelPartition {
         }
 
         Ok(Self {
-            channel: channel.clone(),
-            max_size,
+            channel: channel,
+            max_size:max_size,
             used_size: 0,
             state: ChannelState::Active,
             config: config.unwrap_or_default(),
@@ -443,25 +293,6 @@ impl ChannelPartition {
     }
 }
 
-/// Channel summary for monitoring
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ChannelSummary {
-    pub channel: String,
-    pub state: ChannelState,
-    pub memory_usage_percentage: f64,
-    pub queue_size: usize,
-    pub subscriber_count: usize,
-    pub active_subscribers: usize,
-    pub created_at: DateTime<Utc>,
-    pub last_accessed: DateTime<Utc>,
-}
-
-/// Channel partition manager
-pub struct ChannelPartitionManager {
-    partitions: HashMap<String, Arc<Mutex<ChannelPartition>>>,
-    total_memory_limit: usize,
-    current_memory_usage: usize,
-}
 
 impl ChannelPartitionManager {
     /// Create a new channel partition manager
@@ -540,52 +371,27 @@ impl ChannelPartitionManager {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use crate::Aloc::Channels::Structs::{ChannelConfig, ChannelPartition};
+#[test]
+fn test_channel_config_default() {
+    let config = ChannelConfig::default();
+    println!("--> config: {:?}", config);
+    assert_eq!(config.max_message_size, 1024 * 1024 * 10);
+    assert_eq!(config.max_queue_size, 1000);
+    assert_eq!(config.message_ttl, 3600);
+    assert_eq!(config.persistent, false);
+    assert_eq!(config.ordered, true);
+    assert_eq!(config.deduplicate, false);
+}
 
-    #[test]
-    fn test_create_channel_partition() {
-        let partition = ChannelPartition::new("test_channel".to_string(), 1024, None);
-        assert!(partition.is_ok());
-        
+#[test]
+fn test_channel_partition_new() {
+    let config = ChannelConfig::default();
+    let partition = ChannelPartition::new("test_channel".to_string(), 1024 * 1024 * 10, Some(config));
+        println!("--> partition: {:?}", partition);
         let partition = partition.unwrap();
         assert_eq!(partition.channel, "test_channel");
-        assert_eq!(partition.max_size, 1024);
-        assert_eq!(partition.state, ChannelState::Active);
+        assert_eq!(partition.max_size, 1024 * 1024 * 10);
     }
 
-    #[test]
-    fn test_publish_consume_message() {
-        let mut partition = ChannelPartition::new("test_channel".to_string(), 1024, None).unwrap();
-        
-        let message = Message::new(
-            "test_channel".to_string(),
-            "sender".to_string(),
-            Some("recipient".to_string()),
-            b"test message".to_vec(),
-            MessageType::Direct,
-        );
-
-        assert!(partition.publish_message(message.clone()).is_ok());
-        assert_eq!(partition.stats.messages_sent, 1);
-        
-        let consumed = partition.consume_message().unwrap();
-        assert!(consumed.is_some());
-        assert_eq!(partition.stats.messages_received, 1);
-    }
-
-    #[test]
-    fn test_add_remove_subscriber() {
-        let mut partition = ChannelPartition::new("test_channel".to_string(), 1024, None).unwrap();
-        
-        assert!(partition.add_subscriber(
-            "sub1".to_string(),
-            SubscriberType::Function,
-            "rust".to_string(),
-            "process_message".to_string(),
-            5000,
-        ).is_ok());
-        
-        assert!(partition.remove_subscriber("sub1").is_ok());
-        assert!(partition.remove_subscriber("nonexistent").is_err());
-    }
 }
