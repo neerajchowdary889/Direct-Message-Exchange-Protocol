@@ -20,20 +20,31 @@ impl MemoryCRUD{
         if self.aloc.channel.get(channel).unwrap().config.max_queue_size <= self.aloc.channel.get(channel).unwrap().message_queue.len() {
             return Err(DmepError::InvalidDataSize("Channel's message queue is full".to_string()));
         }
+        // if channel is not there, return error
+        if !self.aloc.channel.contains_key(channel) {
+            return Err(DmepError::InvalidDataSize("Channel is not found".to_string()));
+        }
+        if !self.aloc.channel.get(channel).unwrap().is_active() {
+            return Err(DmepError::InvalidDataSize("Channel is not active".to_string()));
+        }
         self.aloc.write_to_channel(channel, data)
     }
 
-    pub fn ReadFromChannel(&mut self, channel: &str, offset: usize, length: usize) -> DmepResult<Vec<u8>> {
-        if offset < 0 {
-            return Err(DmepError::InvalidDataSize("Offset is less than 0".to_string()));
+    pub fn ConsumeFromChannel(&mut self, channel: &str, max_messages: usize) -> DmepResult<Vec<u8>> {
+        if max_messages <= 0 {
+            return Err(DmepError::InvalidDataSize("Max messages is 0 - nil data supplied".to_string()));
         }
-        if length <= 0 {
-            return Err(DmepError::InvalidDataSize("Length is 0 - nil data supplied".to_string()));
+        if channel.is_empty() {
+            return Err(DmepError::InvalidDataSize("Channel is empty".to_string()));
         }
-        if offset + length > self.aloc.channel.get(channel).unwrap().config.max_message_size {
-            return Err(DmepError::InvalidDataSize("Offset and length is greater than the channel's max message size".to_string()));
+        // if channel is not there, return error
+        if !self.aloc.channel.contains_key(channel) {
+            return Err(DmepError::InvalidDataSize("Channel is not found".to_string()));
         }
-        self.aloc.read_from_channel(channel, offset, length)
+        if !self.aloc.channel.get(channel).unwrap().is_active() {
+            return Err(DmepError::InvalidDataSize("Channel is not active".to_string()));
+        }
+        self.aloc.consume_from_channel(channel, max_messages)
     }
 
 }
