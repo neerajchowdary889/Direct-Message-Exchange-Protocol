@@ -1,7 +1,7 @@
 mod ICP;
 mod Aloc;
-
-use ICP::structs::*;
+mod Utils;
+use ICP::Structs::*;
 use Aloc::Aloc::Aloc as MemoryAllocator;
 use Aloc::Channels::Aloc::{
     ChannelPartition, ChannelPartitionManager, ChannelConfig, ChannelState, 

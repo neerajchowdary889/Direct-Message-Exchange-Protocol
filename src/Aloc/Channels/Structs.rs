@@ -1,10 +1,9 @@
 use serde::{Serialize, Deserialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use uuid::Uuid;
 use chrono::{DateTime, Utc};
 use thiserror::Error;
-use crate::ICP::structs::{Message};
+use crate::ICP::Structs::{Message};
 
 /// Error types for channel partition operations
 #[derive(Error, Debug)]

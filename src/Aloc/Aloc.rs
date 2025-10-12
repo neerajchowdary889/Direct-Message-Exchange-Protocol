@@ -1,13 +1,11 @@
 use std::path::PathBuf;
 use std::collections::HashMap;
 use shared_memory::{Shmem, ShmemConf, ShmemError};
-use uuid::Uuid;
 use chrono::Utc;
 use thiserror::Error;
-use serde::{Serialize, Deserialize};
 use crate::Aloc::Channels::Structs::ChannelPartition;
-
-use crate::ICP::structs::{SharedMemorySegment, DmepError, DmepResult};
+use crate::Utils::Alocutils::{INIT_SharedMemorySegment, get_channel_names, get_segment_info, get_shmem, get_shmem_mut, get_total_channel_memory, get_total_memory_usage};
+use crate::ICP::Structs::{SharedMemorySegment, DmepError, DmepResult};
 
 /// Error types for memory allocation operations
 #[derive(Error, Debug)]
@@ -36,6 +34,18 @@ impl From<ShmemError> for AllocationError {
     }
 }
 
+impl From<DmepError> for AllocationError {
+    fn from(err: DmepError) -> Self {
+        match err {
+            DmepError::SharedMemory(msg) => AllocationError::SharedMemoryAllocation(msg),
+            DmepError::Serialization(msg) => AllocationError::InvalidConfig(format!("Serialization error: {}", msg)),
+            DmepError::Deserialization(msg) => AllocationError::InvalidConfig(format!("Deserialization error: {}", msg)),
+            DmepError::SubscriptionNotFound(msg) => AllocationError::InvalidConfig(format!("Subscription error: {}", msg)),
+            DmepError::InvalidMessage(msg) => AllocationError::InvalidConfig(format!("Invalid message: {}", msg)),
+            DmepError::ChannelError(msg) => AllocationError::InvalidConfig(format!("Channel error: {}", msg)),
+        }
+    }
+}
 /// Memory allocator for shared memory segments
 pub struct Aloc {
     /// Define the channel partition allocation
@@ -81,6 +91,24 @@ impl Aloc {
             ));
         }
 
+        // Check if the channel is already allocated
+        for channel in channel.keys() {
+            if segments.contains_key(channel) {
+                return Err(AllocationError::ChannelAlreadyExists(channel.to_string()));
+            }
+        }
+
+        // Check if the total memory allocation size of all channels is greater than the max size
+        // aggregatedMemorySize = sum(channel.max_size)
+        let mut aggregated_MemorySize = 0;
+        for channel in channel.values() {
+            aggregated_MemorySize += channel.max_size;
+        }
+        // Aggregated memory size should be less than 90% of the max size for safety
+        if aggregated_MemorySize > max_size * 0.9 as usize  {
+            return Err(AllocationError::MemoryLimitExceeded);
+        }
+
         Ok(Self {
             channel: channel,
             max_size,
@@ -94,24 +122,29 @@ impl Aloc {
     }
 
     /// Add a channel to the channel vector
-    pub fn add_channel(&mut self, channel_name: String, max_size: usize) -> Result<(), AllocationError> {
-        if self.channel.contains_key(&channel_name) {
+    pub fn add_channel(&mut self, channel: ChannelPartition, strict: bool) -> Result<(), AllocationError> {
+        if self.channel.contains_key(&channel.channel) {
             return Err(AllocationError::ChannelAlreadyExists(
-                format!("Channel '{}' already exists", channel_name)
+                format!("Channel '{}' already exists", channel.channel)
             ));
         }
 
         // Check if adding this channel would exceed memory limit
-        let current_channel_memory = self.get_total_channel_memory();
-        if current_channel_memory + max_size > self.max_size {
+            let current_channel_memory = get_total_channel_memory(self);
+        if current_channel_memory + channel.max_size > self.max_size && strict {
             return Err(AllocationError::MemoryLimitExceeded);
+        } else if current_channel_memory + channel.max_size > self.max_size && !strict {
+            // Increase the max size of the allocator
+            self.max_size += channel.max_size;
+            // TODO: we increased in the struct make sure it is triggered to the memory allocator
         }
 
-        let channel_name_clone = channel_name.clone();
-        self.channel.insert(channel_name, SimpleChannelPartition {
-            channel: channel_name_clone,
-            max_size,
-        });
+        // Add the channel to the allocator
+        self.channel.insert(channel.channel.clone(), channel.clone());
+
+        // Create the shared memory segment using the dedicated function
+        let segment = INIT_SharedMemorySegment(channel.clone());
+        self.allocate_shared_memory_segment(channel, segment)?;
 
         // Verify the memory limit after adding
         self.check_memory_limit()?;
@@ -134,6 +167,9 @@ impl Aloc {
                 self.shmem_objects.remove(&segment_id);
             }
 
+            // Remove the channel from the channel map
+            self.channel.remove(channel_name);
+
             Ok(())
         } else {
             Err(AllocationError::ChannelNotFound(
@@ -143,44 +179,33 @@ impl Aloc {
     }
 
     /// Allocate a new shared memory segment to the Aloc:Channels in the self.channel vector
-    pub fn allocate_shared_memory_segment(&mut self, channel: &str, max_size: usize) -> DmepResult<String> {
+    pub fn allocate_shared_memory_segment(&mut self, channel: ChannelPartition, segment: SharedMemorySegment) -> DmepResult<String> {
         // Check if we have enough total memory available
-        let current_usage = self.get_total_memory_usage();
-        if current_usage + max_size > self.max_size {
+        let current_usage = get_total_memory_usage(self);
+        if current_usage + segment.size > self.max_size {
             return Err(DmepError::SharedMemory(
                 "Insufficient memory: would exceed maximum allocation limit".to_string(),
             ));
         }
 
         // Check if the channel is already allocated
-        if self.channel.contains_key(channel) {
-            return Err(DmepError::SharedMemory(format!("Channel already allocated: {}", channel)));
+        if self.channel.contains_key(&channel.channel) {
+            return Err(DmepError::SharedMemory(format!("Channel already allocated: {}", channel.channel)));
         }
-
-        // Generate unique segment ID
-        let segment_id = format!("{}_segment_{}", channel, Uuid::new_v4());
-
-        // Add the channel to the allocator
-        self.channel.insert(channel.to_string(), SimpleChannelPartition {
-            channel: channel.to_string(),
-            max_size: max_size,
-        });
 
         // Create shared memory segment
         let shmem = ShmemConf::new()
-            .size(max_size)
+            .size(segment.size)
             .create()
             .map_err(|e| DmepError::SharedMemory(format!("Failed to create shared memory: {}", e)))?;
 
         // Initialize the memory with zeros
         unsafe {
-            std::ptr::write_bytes(shmem.as_ptr(), 0, max_size);
+            std::ptr::write_bytes(shmem.as_ptr(), 0, segment.size);
         }
 
-        // Create segment metadata
-        let segment = SharedMemorySegment::new(channel.to_string(), segment_id.clone(), max_size);
-
         // Store all components
+        let segment_id = segment.id.clone();
         self.segments.insert(segment_id.clone(), segment);
         self.shmem_objects.insert(segment_id.clone(), shmem);
 
@@ -190,17 +215,19 @@ impl Aloc {
     /// Initialize all channels with shared memory segments
     pub fn initialize_all_channels(&mut self) -> DmepResult<Vec<String>> {
         let mut initialized_segments = Vec::new();
-        let channel_names: Vec<String> = self.channel.keys().cloned().collect();
+        let channel_names: Vec<String> = get_channel_names(self);
 
         for channel_name in channel_names {
             if let Some(channel_partition) = self.channel.get(&channel_name) {
-                let max_size = channel_partition.max_size;
-                
                 // Check if segment already exists for this channel
                 let segment_exists = self.segments.values().any(|segment| segment.channel == channel_name);
                 
                 if !segment_exists {
-                    match self.allocate_shared_memory_segment(&channel_name, max_size) {
+                    // Create the shared memory segment
+                    let segment = INIT_SharedMemorySegment(channel_partition.clone());
+                    
+                    // Allocate the shared memory segment
+                    match self.allocate_shared_memory_segment(channel_partition.clone(), segment) {
                         Ok(segment_id) => {
                             println!("Initialized channel '{}' with segment: {}", channel_name, segment_id);
                             initialized_segments.push(segment_id);
@@ -218,59 +245,6 @@ impl Aloc {
         Ok(initialized_segments)
     }
 
-    /// Initialize a specific channel with shared memory
-    pub fn initialize_channel(&mut self, channel_name: &str) -> DmepResult<String> {
-        if let Some(channel_partition) = self.channel.get(channel_name) {
-            let max_size = channel_partition.max_size;
-            
-            // Check if segment already exists for this channel
-            let segment_exists = self.segments.values().any(|segment| segment.channel == channel_name);
-            
-            if segment_exists {
-                return Err(DmepError::SharedMemory(
-                    format!("Channel '{}' already has a memory segment", channel_name)
-                ));
-            }
-
-            self.allocate_shared_memory_segment(channel_name, max_size)
-        } else {
-            Err(DmepError::SharedMemory(
-                format!("Channel '{}' not found", channel_name)
-            ))
-        }
-    }
-
-    /// Get all channel names
-    pub fn get_channel_names(&self) -> Vec<String> {
-        self.channel.keys().cloned().collect()
-    }
-
-    /// Get channel information
-    pub fn get_channel_info(&self, channel_name: &str) -> Option<&SimpleChannelPartition> {
-        self.channel.get(channel_name)
-    }
-
-    /// Get a mutable reference to a shared memory object
-    pub fn get_shmem_mut(&mut self, segment_id: &str) -> DmepResult<&mut Shmem> {
-        self.shmem_objects
-            .get_mut(segment_id)
-            .ok_or_else(|| DmepError::SharedMemory(format!("Segment not found: {}", segment_id)))
-    }
-
-    /// Get a reference to a shared memory object
-    pub fn get_shmem(&self, segment_id: &str) -> DmepResult<&Shmem> {
-        self.shmem_objects
-            .get(segment_id)
-            .ok_or_else(|| DmepError::SharedMemory(format!("Segment not found: {}", segment_id)))
-    }
-
-    /// Get segment metadata
-    pub fn get_segment_info(&self, segment_id: &str) -> DmepResult<&SharedMemorySegment> {
-        self.segments
-            .get(segment_id)
-            .ok_or_else(|| DmepError::SharedMemory(format!("Segment not found: {}", segment_id)))
-    }
-
     /// Write data to a specific offset in a segment
     pub fn write_to_segment(
         &mut self,
@@ -279,7 +253,7 @@ impl Aloc {
         data: &[u8],
     ) -> DmepResult<()> {
         // Check bounds first
-        let segment_size = self.get_segment_info(segment_id)?.size;
+        let segment_size = get_segment_info(self, segment_id)?.size;
         if offset + data.len() > segment_size {
             return Err(DmepError::SharedMemory(
                 "Write operation would exceed segment bounds".to_string(),
@@ -287,7 +261,7 @@ impl Aloc {
         }
 
         // Perform the write
-        let shmem = self.get_shmem_mut(segment_id)?;
+        let shmem = get_shmem_mut(self, segment_id)?;
         unsafe {
             let ptr = shmem.as_ptr().add(offset);
             std::ptr::copy_nonoverlapping(data.as_ptr(), ptr, data.len());
@@ -310,8 +284,8 @@ impl Aloc {
         offset: usize,
         length: usize,
     ) -> DmepResult<Vec<u8>> {
-        let segment = self.get_segment_info(segment_id)?;
-        let shmem = self.get_shmem(segment_id)?;
+        let segment = get_segment_info(self, segment_id)?;
+        let shmem = get_shmem(self, segment_id)?;
 
         // Check bounds
         if offset + length > segment.size {
@@ -339,19 +313,10 @@ impl Aloc {
         Ok(())
     }
 
-    /// Get total memory usage across all segments
-    pub fn get_total_memory_usage(&self) -> usize {
-        self.segments.values().map(|s| s.used).sum()
-    }
-
-    /// Get total allocated memory for all channels
-    pub fn get_total_channel_memory(&self) -> usize {
-        self.channel.values().map(|c| c.max_size).sum()
-    }
 
     /// Check if total channel memory exceeds the limit
     pub fn check_memory_limit(&self) -> Result<(), AllocationError> {
-        let total_channel_memory = self.get_total_channel_memory();
+        let total_channel_memory = get_total_channel_memory(self);
         if total_channel_memory > self.max_size {
             return Err(AllocationError::InvalidConfig(format!(
                 "Total memory usage of all channels combined ({}) exceeds max_size ({})", 
@@ -362,10 +327,6 @@ impl Aloc {
         Ok(())
     }
 
-    /// Get available memory
-    pub fn get_available_memory(&self) -> usize {
-        self.max_size - self.get_total_memory_usage()
-    }
 
     /// Check if we should start swapping
     pub fn should_swap(&self) -> bool {
@@ -373,21 +334,8 @@ impl Aloc {
             return false;
         }
 
-        let usage_percentage = (self.get_total_memory_usage() * 100) / self.max_size;
+        let usage_percentage = (get_total_memory_usage(self) * 100) / self.max_size;
         usage_percentage >= self.swapping_threshold as usize
-    }
-
-    /// Get all active segment IDs
-    pub fn get_active_segments(&self) -> Vec<String> {
-        self.segments.keys().cloned().collect()
-    }
-
-    /// Get memory statistics
-    pub fn get_memory_stats(&self) -> (usize, usize, usize) {
-        let total = self.max_size;
-        let used = self.get_total_memory_usage();
-        let available = total - used;
-        (total, used, available)
     }
 
     /// Cleanup expired or unused segments
@@ -412,6 +360,7 @@ impl Aloc {
 
         Ok(cleaned)
     }
+
 }
 
 impl Drop for Aloc {

@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use chrono::Utc;
 
 
-use crate::ICP::structs::{Message, MessageType, DmepError, DmepResult, SharedMemorySegment};
+use crate::ICP::Structs::{Message, MessageType, DmepError, DmepResult, SharedMemorySegment};
 use crate::Aloc::Channels::Structs::{ChannelConfig, ChannelState, ChannelPartitionError, SubscriberType, SubscriberInfo, ChannelStats, ChannelPartition, ChannelSummary, ChannelPartitionManager};
 
 
